@@ -1,0 +1,24 @@
+---
+title: "Provisioning"
+output: html_notebook
+---
+
+```{r setup}
+# source("../r/libraries.R")
+library(data.table)
+library(dplyr)
+```
+
+
+initialize config
+
+
+```{r}
+# source("./")
+JV_p1_inputdata_preprocessed <- read.csv("./jv_notebooks/JV_p1_inputdata_preprocessed.csv")
+JV_p1_inputdata_preprocessed_num <- JV_p1_inputdata_preprocessed %>% dplyr::select(!c("isos"))
+JV_p1_inputdata_preprocessed_char <- JV_p1_inputdata_preprocessed %>% dplyr::select(c("isos"))
+JV_p1_inputdata_preprocessed_num[] <- lapply(JV_p1_inputdata_preprocessed_num, as.numeric)
+JV_p1_inputdata_preprocessed_final <- cbind(JV_p1_inputdata_preprocessed_char, JV_p1_inputdata_preprocessed_num)
+fwrite(JV_p1_inputdata_preprocessed_final, "JV_p1_inputdata_preprocessed_no_scientific.csv", row.names = FALSE, scipen = 999)
+```

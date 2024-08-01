@@ -1,0 +1,356 @@
+---
+title: "Provisioning"
+author: "Val"
+date: "5/29/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("../../r/utils/functions.R")
+library(tidyr)
+library(dplyr)
+library(tidyverse)
+library(missMDA)
+library(FactoMineR)
+library(FactoInvestigate)
+library(Factoshiny)
+library(caret)
+library(leaps)
+library(tibble)
+```
+
+## Principal Component Analysis
+
+Load the data set
+
+```{r dataset}
+staticPathWB <- "./Static/WB/pivoted/"
+withOutcomes <- read.csv("../../data/after_clean/data_frames/withOutcomes.csv")
+energyuse <- read.csv("../../data/after_clean/wb_pivoted/formatted/energyuse.csv")
+withEnergyUseList <- list(withOutcomes, energyuse)
+withEnergyUse <- withEnergyUseList %>% reduce(left_join, by=c('Country.Code', 'Year'))
+wbJoinedSorted <- withOutcomes %>% arrange(Country.Code, Year)
+```
+Separate columns with few observations (less than 10k)
+
+```{r fewobs}
+sort(colSums(is.na(wbJoinedSorted)))
+
+values_worry_cols <- c("WorryGovPrivacy", "WorryWar", "WorryTerrorist", "WorryCivilWar")
+values_worry_educ <- "WorryEduc" # only this not excluded
+values_conf_cols <- c("ConfCourts", "ConfParties", "ConfCivilService", "ConfGov", "ConfParliament")
+values_accept_cols <- c("BeatWife", "Violence", "TaxCheat", "AcceptBribe", "StealProp")
+values_member_cols <- c("SelfHelpOrgMember", "ProfOrgMember", "CharityOrgMember", "ConsumOrgMember", "EnvOrgMember")
+values_religion_cols <- c("BelieveGod")
+values_child_faith <- c("ChildFaith")
+all_values_cols <- c(values_worry_cols, values_conf_cols, values_accept_cols, values_member_cols, values_religion_cols, values_worry_educ, values_child_faith)
+
+few_obs_cols <- c("femalemanager", "informal", "gendergap")
+
+## Income columns. We control for these by using income groups so safe to remove
+income_cols <- c("gdppercap", "gnipercap")
+wealth_cols <- c("wealth", "wealthincome")
+
+# testDFComplete <- wbJoinedSorted %>% filter(Country.Name != "")
+# testDFSelectedValues <- wbJoinedSorted %>% select(!c(values_worry_cols, values_conf_cols,values_religion_cols, values_member_cols, few_obs_cols)) %>% filter(Country.Name != "")
+#testDFNoValuesNoFewObs <- wbJoinedSorted %>% select(!c(all_values_cols, few_obs_cols)) %>% filter(Country.Name != "")
+testDFNoValuesNoFewObsNoIncome <- wbJoinedSorted %>% select(!c(all_values_cols, few_obs_cols, income_cols)) %>% filter(Country.Name != "")
+#testDFSelectedValuesNoIncome <- wbJoinedSorted %>% select(!c(values_worry_cols, values_conf_cols,values_religion_cols, values_member_cols, few_obs_cols, income_cols)) %>% filter(Country.Name != "")
+#testDFWithOutcomesSelectedValuesNoIncome <- wbJoinedSorted %>% select(!c(values_worry_cols, values_conf_cols,values_religion_cols, values_member_cols, few_obs_cols, income_cols)) %>% filter(Country.Name != "") %>% select(!c("X","X.1","X.2", "X.3", "X.4"))
+provisioning <- testDFWithOutcomesSelectedValuesNoIncome
+sort(colSums(is.na(provisioning)))
+```
+
+Finish preparing the data set
+
+```{r finaldata}
+# testDF$ID <- paste(testDF$Year, testDF$Country.Name, sep=" - ")
+# sort(table(filter(testDF, !is.na(WorryEduc))$Year))
+
+#testDF_filtered <- testDFSelectedValuesNoIncome %>% filter(region == "Europe & Central Asia") %>% filter(Year == 2018) %>% select(!c("X","X.1","X.2", "X.3", "X.4"))
+testDF_filtered <- provisioning
+# filter one year: testDFNoValuesNoFewObsNoIncome %>% filter(Year == 2018)
+# filter one income group: testDFNoValuesNoFewObsNoIncome %>% filter(incomegroup == "High income")
+# filter one region: testDFNoValuesNoFewObsNoIncome %>% filter(region == "Europe & Central Asia")
+
+testDF_indexed <- testDF_filtered %>% column_to_rownames(., var = 'Country.Name')
+var_df <- testDF_filtered %>% select(!c("incomegroup", "region")) %>% rename(ID = "X.5")
+countryYear <- var_df %>% select(c("Country.Code", "Year")) 
+incomeGroupAndRegion <- testDF_filtered %>% select(c("incomegroup", "region"))
+var_df[var_df == ".."] <- NA
+energyuse[energyuse == ".."] <- 0
+cols <- names(var_df)[11:66]
+var_df$concentration <- gsub(",",".",var_df$concentration)
+var_df[cols] <- lapply(var_df[cols], as.numeric)
+provisioning <- cbind(var_df, incomeGroupAndRegion)
+```
+
+Conduct Principal Component Analysis (PCA) on the formatted and cleaned data set
+
+```{r impute}
+testDF_toimpute <- var_df %>% select(!c("Country.Code", "Year")) %>% select_if(function(v) var(v, na.rm=TRUE) != 0) 
+testDF_imputed <- imputePCA(testDF_toimpute, ncp=2, maxiter=1000000)
+```
+
+Conduct feature selection (caret) on imputed data
+```{r gpt}
+outcomesWithCountries <- cbind(countryYear, outcomes)
+lifeExpectancyWithCountries <- outcomesWithCountries %>% select(c("Country.Code", "Year", "lifeexpectancy"))
+
+indicatorsWithCountries <- cbind(countryYear, exceptOutcomes)
+energyuseWithCountries <- energyuse %>% filter(Country.Code != "")
+energyUseNoNA <- energyuseWithCountries %>% filter(energyuse != 0)
+indicatorsWithEnergyUseList <- list(energyUseNoNA, indicatorsWithCountries) 
+indicatorsWithEnergyUse <- lifeExpectancyWithEnergyUseList %>% reduce(left_join, by=c('Country.Code', 'Year'))
+lifeExpectancyWithIndicatorsEUseList <- list(indicatorsWithEnergyUse, lifeExpectancyWithCountries)
+lifeExpectancyWithIndicatorsEUse <- lifeExpectancyWithIndicatorsEUseList %>% reduce(left_join, by=c('Country.Code', 'Year'))
+lifeExpectancyOverEnergyUseWithCountries <- lifeExpectancyWithEnergyUseWithCountries %>% mutate(lifeexpectancy_over_energy = lifeexpectancy / as.numeric(energyuse)) %>% select(!c("lifeexpectancy", "energyuse"))
+withLEOverEnergyUse <- lifeExpectancyWithIndicatorsEUse %>% mutate(lifeexpectancy_over_energy = lifeexpectancy / as.numeric(energyuse)) %>% select(!c("lifeexpectancy", "energyuse"))
+write.csv(withLEOverEnergyUse, "indicatorsWithEnergyuse.csv")
+withLEOverEnergyUse
+#write.csv(outcomesWithCountries, "outcomes.csv")
+#write.csv(lifeExpectancyWithCountries, "lifeexpectancy.csv")
+#write.csv(indicatorsWithCountries, "indicators.csv")
+#write.csv(energyuseWithCountries, "energyuse.csv")
+#leOverEnergyAndIndicators <- cbind(countryYear, exceptOutcomes, energyUseNoNA)
+```
+
+```{r caret}
+imputed <- testDF_imputed$completeObs
+index <- which(colnames(imputed) == "lifeexpectancy")
+exceptOutcomes <- imputed[,8:55]
+outcomes <- imputed[,56:63]
+lifeExpectancy <- imputed[,index]
+set.seed(10)
+ctrl <- rfeControl(functions = lmFuncs,
+                   method = "repeatedcv",
+                   repeats = 5,
+                   verbose = FALSE)
+lmProfile <- rfe(exceptOutcomes, lifeExpectancy,
+                 sizes = 10,
+                 rfeControl = ctrl,
+                 na.action = na.omit)
+```
+```{r bestsubset}
+scaled_withLEOverEnergyUse <- withLEOverEnergyUse %>% select(!c("Country.Code", "Year"))
+for_best_subset <- scaled_withLEOverEnergyUse %>% mutate_all(~(scale(.) %>% as.vector))
+Best_Subset <-
+    regsubsets(lifeexpectancy_over_energy~.,
+               data = for_best_subset,
+               nbest = 1,      # 1 best model for each number of predictors
+               nvmax = 48,    # NULL for no limit on number of variables
+               force.in = NULL, force.out = NULL,
+               method = "exhaustive")
+summary_best_subset <- summary(Best_Subset)
+
+# courtesy http://sthda.com/english/articles/37-model-selection-essentials-in-r/155-best-subsets-regression-essentials-in-r for the functions below
+
+# id: model id
+# object: regsubsets object
+# data: data used to fit regsubsets
+# outcome: outcome variable
+get_model_formula <- function(id, object, outcome){
+  # get models data
+  models <- summary(object)$which[id,-1]
+  # Get outcome variable
+  #form <- as.formula(object$call[[2]])
+  #outcome <- all.vars(form)[1]
+  # Get model predictors
+  predictors <- names(which(models == TRUE))
+  predictors <- paste(predictors, collapse = "+")
+  # Build model formula
+  as.formula(paste0(outcome, "~", predictors))
+}
+get_model_formula(3, Best_Subset, "lifeexpectancy_over_energy")
+get_cv_error <- function(model.formula, data){
+  set.seed(1)
+  train.control <- trainControl(method = "cv", number = 5)
+  cv <- train(model.formula, data = data, method = "lm",
+              trControl = train.control)
+  cv$results$RMSE
+}
+model.ids <- 1:48
+cv.errors <-  map(model.ids, get_model_formula, Best_Subset, "lifeexpectancy_over_energy") %>%
+  map(get_cv_error, data = for_best_subset) %>%
+  unlist()
+cv.errors
+options(scipen = 999)
+which.min(cv.errors)
+sort(coef(Best_Subset, 19))
+```
+
+```{r pca}
+
+testDF_PCA <- PCA(testDF_imputed$completeObs, scale.unit = TRUE)
+
+PCAshiny(testDF_PCA)
+
+Investigate(testDF_PCA, file = "./PCA2018HighIncome.Rmd", document = "pdf_document",
+            parallel = TRUE, Iselec = "contrib 58", nclust=7, ncp=4, ellipse=TRUE)
+# Iselec = "contrib 120", nclust=8,
+ 
+testDF_PCA_eig.val <- testDF_PCA$eig
+barplot(testDF_PCA_eig.val[, 2],
+        names.arg = 1:nrow(testDF_PCA_eig.val),
+        main = "Variances Explained by PCs (%)",
+        xlab = "Principal Components",
+        ylab = "Percentage of variances",
+        col ="steelblue")
+
+testDF_PCA_var.cor <- data.frame(testDF_PCA$var$cor) %>% filter((Dim.1 > 0.8) | (Dim.2 > 0.8) | (Dim.3 > 0.8) | (Dim.4 > 0.8) | (Dim.5 > 0.8))
+
+gr <- plot(testDF_PCA, choix='var', cex=0.5)
+gr + theme(panel.grid.major = element_blank(),
+   plot.title=element_text(size=14, color="blue"),
+   axis.title = element_text(size=12, color="red")) + coord_cartesian(clip = "off", xlim = c(-2, 2))
+
+testDF_PCA_summary <- list(Dim1 = apply(top_n(testDF_PCA_var.cor, 10, Dim.1)[,"Dim.1", drop=FALSE], 1, as.character, c), Dim2 = apply(top_n(testDF_PCA_var.cor, 10, Dim.2)[,"Dim.2", drop=FALSE], 1, as.character, c), Dim3 = apply(top_n(testDF_PCA_var.cor, 10, Dim.3)[,"Dim.3", drop=FALSE], 1, as.character, c), Dim4 = apply(top_n(testDF_PCA_var.cor, 10, Dim.4)[,"Dim.4", drop=FALSE], 1, as.character, c), Dim5 = apply(top_n(testDF_PCA_var.cor, 10, Dim.5)[,"Dim.5", drop=FALSE], 1, as.character, c))
+testDF_PCA_summary
+
+```
+
+### Code for cleaning, merging, formatting imported data sets
+
+Load initial data frame
+
+```{r initial}
+# staticPathWBGender <- "./Static/WBGender/"
+# 
+# DataSets <- list.files(staticPathWB)
+# dfbase <- read.csv("./Static/base.csv")
+# importedDF <- read.csv(paste(staticPathWB, DataSets[31], sep="")) %>% filter(Country.Code != "")
+# tempList <- list(wbGenderAndValues, importedDF)
+# wbJoined <- tempList %>% reduce(full_join, by=c('Country.Code', 'Year'))
+# wbJoinedSorted <- wbJoined %>% arrange(Country.Code, Year)
+# write.csv(wbJoinedSorted, "./Static/wbAndGender.csv")
+```
+
+Merging gender data
+
+```{r cleandata}
+# femaleparliament.csv <- femaleparliament.csv %>% rename_at('Value', ~'femaleparliament')
+# femaleparliament <- femaleparliament.csv %>% select(c("Country.Code", "Year", "femaleparliament"))
+# df_list <- list(femalemanager, femaleminister, femaleparliament)
+# df_list_merged <- df_list %>% reduce(full_join, by=c('Country.Code', 'Year'))
+# write.csv(df_list_merged, paste(staticPathWBGender, "merged.csv", sep=""), row.names=FALSE)
+# genderDF <- read.csv(paste(staticPathWBGender, "merged.csv", sep=""))
+# agriDF <- read.csv("./Static/WB/pivoted/agriculture.csv") %>% filter(Country.Code != "")
+# formattedAgriDF <- formatWBYears(agriDF) %>% rename_at('value', ~"agriculture")
+# newdflist <- list(genderDF, formattedAgriDF)
+# newBaseDF <- newdflist %>% reduce(right_join, by=c('Country.Code', 'Year')) %>% select(c("Country.Name", "Country.Code", "Year", "agriculture", "femalemanager", "femaleminister", "femaleparliament"))
+# write.csv(newBaseDF, "./Static/base.csv", row.names = FALSE)
+
+```
+
+Adding variables from various datasets to the main base data frame
+
+```{r addvars}
+#withWID <- read.csv("./Static/withWID.csv")
+#withIncomeGroups <- read.csv("./withIncomeGroups.csv")
+#incomegroups <- read.csv("./Static/Manual/incomegroup.csv", sep = ";")
+#incomegroupslist <- list(withWID, incomegroups)
+#withIncomeGroups <- incomegroupslist %>% reduce(left_join, by=c('Country.Code')) %>% select(!"Country.Name.y") %>% #rename(Country.Name = Country.Name.x)
+#outcomes <- read.csv("./Static/Manual/dependentvars/outcomes_full.csv", sep=";")
+# outcomes_selected <- outcomes %>% select(!c("democraticquality", "equality", "employment"))
+#outcomeslist <- list(withIncomeGroups, outcomes_selected)
+#withOutcomes <- outcomeslist %>% reduce(left_join, by=c('Country.Code', 'Year')) %>% select(!"Country.Name.y") %>% rename(Country.Name = Country.Name.x)
+
+# wbGender <- read.csv("./Static/wbAndGender.csv")
+# values <- read.csv("./Static/Manual/processed/WVS/values.csv")
+# values_df <- values %>% select(c("S020", "COUNTRY_ALPHA", "A006", "F050", "F202", "F028B", "A040", "A103", "A106B", "A105", "A104", "A106C", "F114B", "F117", "F116",  "F114D", "F199", "E069_07", "E069_11", "E069_08", "E069_12", "E069_17", "H006_05", "H006_04", "H006_03", "H006_02", "H006_06")) %>% rename(Year=S020, Country.Code=COUNTRY_ALPHA, ReligionImportant=A006, BelieveGod=F050,ReligionOverScience=F202,PrayOften=F028B,ChildFaith=A040,EnvOrgMember=A103,ConsumOrgMember=A106B,CharityOrgMember=A105,ProfOrgMember=A104,SelfHelpOrgMember=A106C,StealProp=F114B,AcceptBribe=F117,TaxCheat=F116,Violence=F114D,BeatWife=F199,ConfParliament=E069_07,ConfGov=E069_11,ConfCivilService=E069_08,ConfParties=E069_12,ConfCourts=E069_17,WorryCivilWar=H006_05,WorryTerrorist=H006_04,WorryWar=H006_03,WorryEduc=H006_02,WorryGovPrivacy=H006_06)
+# values_df_agg <- values_df %>% group_by(Year, Country.Code) %>% summarise_at(vars(A001:X051), mean, na.rm = TRUE)
+# write.csv(values_df_agg,"./Static/Manual/processed/WVS/values_df_agg.csv")
+# values_df_final <- values_df_aggregated %>% select(-c("ReligionImportant", "ReligionOverScience", "PrayOften"))
+# 
+# wbGenderAndValuesList <- list(wbGender, values_df_final)
+# wbGenderAndValues <- wbGenderAndValuesList %>% reduce(full_join, by=c('Country.Code', 'Year'))
+# 
+# wbJoinedSorted <- wbGenderAndValues %>% arrange(Country.Code, Year)
+# write.csv(wbJoinedSorted, "./Static/wbGenderAndValues.csv")
+
+# eci <- read.csv("./Static/Manual/ecirank/rankings.csv")
+# eci_formatted <- eci %>% select(year, sitc_eci, code) %>% rename(Year=year, ecirank=sitc_eci, Country.Code=code)
+# wbGenderValuesGovExp <- read.csv("./Static/wbGenderValuesAndGovExp.csv")
+# write.csv(wbJoinedSorted, "./Static/wbGenderValuesAndGovExp.csv")
+
+# homicide <- read.csv("./Static/Manual/homicide.csv")
+# homicide_formatted <- homicide %>% select(!"Entity") %>% rename(Country.Code=Code, homicide=	
+# Share.of.total.deaths...Both.Sexes...All.ages)
+# write.csv(wbJoinedSorted, "./Static/wbGenderValuesECIHomicide.csv")
+
+#patents_formatted <- readAndPivotWB("./Static/Manual/patents_fmt_withcodes.csv", "X.*", ";") %>%  #rename(Country.Code=Origin..Code., patents=value)
+#patents_withyears <-  formatWBYears(patents_formatted) %>% select(Country.Code, Year, patents)
+
+# gendergap <- read.csv("./Static/Manual/gendergap.csv")
+# gendergap_formatted <- gendergap %>% select(!Entity) %>% rename(Country.Code=Code, gendergap=Gender.wage.gap....)
+
+# gini <- read.csv("./Static/WB/pivoted/formatted/gini.csv")
+
+# concentration <- readAndPivotWB("./Static/Manual/concentration/concentration.csv", "X.*", sep=";")
+# concentration_formatted <- concentration %>% select(c(Country.Name, year, value))
+# concentration_withyears <- formatWBYears(concentration_formatted) %>% select(!"year") %>% rename(concentration=value)
+
+# ethnic <- read.csv("./Static/Manual/ethnic/HIEF_data.csv") %>% rename(Country.Name=Country, ethnic=EFindex)
+
+# divorce <- read.csv("./Static/Manual/divorces.csv")
+# divorce_formatted <- divorce %>% select(!Entity) %>% rename(Country.Code=Code,divorce=Crude.divorce.rate..per.1.000.inhabitants.)
+
+# unvotes <- read.csv("./Static/Manual/unvotes/IdealpointestimatesAll_Jun2022.csv")
+# unvotes_formatted <- unvotes %>% select(iso3c, session, IdealPointAll) %>% rename(Country.Code=iso3c, Year=session,unvotes=IdealPointAll)
+# unvotes_formatted$Year <- unvotes_formatted$Year + 1945
+
+# ideology <- read.csv("./Static/Manual/leaderideology.csv")
+# ideology_formatted <- ideology %>% select(c(country_name, year, hog_left)) %>% rename(Country.Name=country_name, Year=year, ideology=hog_left)
+
+# informal <- readAndPivotWB("./Static/Manual/informal.csv", "X.*")
+# informal_formatted <- formatWBYears(informal) %>% select(!year) %>% rename(Country.Name=Economy, Country.Code=Code, informal=value)
+# 
+# wbGenderValuesECIHomicidePatentGGapGiniConcEthnicDivorceUNIdeologyInformalList <- list(wbGenderValuesECIHomicidePatentGGapGiniConcEthnicDivorceUNIdeology, informal_formatted)
+# wbGenderValuesECIHomicidePatentGGapGiniConcEthnicDivorceUNIdeologyInformal <- wbGenderValuesECIHomicidePatentGGapGiniConcEthnicDivorceUNIdeologyInformalList %>% reduce(left_join, by=c('Country.Code', 'Year')) %>% select(!Country.Name.y) %>% rename(Country.Name=Country.Name.x)
+
+# population <- read.csv("./Static/Manual/population.csv")
+# population_countries <- population %>% filter(ISO3_code != "") %>% select(ISO3_code, Location, TPopulation1Jan, Time) %>% filter(Time < 2022) %>% rename(Country.Code=ISO3_code, Country.Name=Location, population=TPopulation1Jan, Year=Time)
+# population_countries$population <- population_countries$population * 1000
+# population_with100k <- population_countries %>% mutate(pop100k=(population/100000))
+# 
+# prison <- read.csv("./Static/Manual/prison/prison_nationals.csv")
+# prison_formatted <- prison %>% select(Iso3_code, Country, Year, VALUE) %>% rename(Country.Code=Iso3_code, Country.Name=Country, prisontotal=VALUE)
+# prison_formatted$Country.Code <- gsub("GBR_E_W", "GBR", prison_formatted$Country.Code)
+# prison_pop_list <- list(prison_formatted, population_with100k)
+# prison_pop <- prison_pop_list %>% reduce(left_join, by=c('Country.Code', 'Year')) %>% select(!Country.Name.x) %>% rename(Country.Name=Country.Name.y) %>% mutate(prison = prisontotal / pop100k) %>% select(!c(prisontotal, population, pop100k))
+# 
+# withPrisonList <- list(withInformal, prison_pop)
+# withPrison <- withPrisonList %>% reduce(left_join, by=c('Country.Code', 'Year'))  %>% select(!Country.Name.y) %>% rename(Country.Name=Country.Name.x)
+# write.csv(withPrison, "./Static/withPrison.csv")
+
+# Add WID data
+
+# wealth <- read.csv("./Static/Manual/WID/wealth/wealth_formatted.csv", sep=";")
+# femaleincome <- read.csv("./Static/Manual/WID/femaleincome/femaleincome_formatted.csv", sep=";")
+# femaleincome[femaleincome == 0] <- NA
+# onepcwealth <- read.csv("./Static/Manual/WID/onepcwealth/onepcwealth_formatted.csv", sep=";")
+# onepcincome <- read.csv("./Static/Manual/WID/onepcincome/onepcincome_formatted.csv", sep=";")
+# wealthincome <- read.csv("./Static/Manual/WID/wealthincome/wealthincome_formatted.csv", sep=";")
+
+## CHECK WHY DUPLICATES ARE CREATED HERE IN LEFT JOIN
+
+# prisonWealthList <- list(withPrison, wealth)
+# withPrisonWealth <- prisonWealthList %>% reduce(left_join, by=c('Country.Name', 'Year')) %>% rename(wealth=Wealth)
+# withPrisonWealthNoDupes <- withPrisonWealth[!duplicated(withPrisonWealth[c("Country.Name","Year")]),]
+# 
+# prisonWealthFemaleIncomeList <- list(withPrisonWealthNoDupes, femaleincome)
+# withPrisonWealthFemaleIncome <- prisonWealthFemaleIncomeList %>% reduce(left_join, by=c('Country.Name', 'Year'))
+# 
+# withOnePcWealthList <- list(withPrisonWealthFemaleIncome, onepcwealth)
+# withOnePcWealth <- withOnePcWealthList %>% reduce(left_join, by=c('Country.Name', 'Year'))
+# withOnePcWealthNoDupes <- withOnePcWealth[!duplicated(withOnePcWealth[c("Country.Name","Year")]),]
+# 
+# withOnePcIncomeList <- list(withOnePcWealthNoDupes, onepcincome)
+# withOnePcIncome <- withOnePcIncomeList %>% reduce(left_join, by=c('Country.Name', 'Year'))
+# withOnePcIncomeNoDupes <- withOnePcIncome[!duplicated(withOnePcIncome[c("Country.Name","Year")]),]
+# 
+# withWealthIncomeList <- list(withOnePcIncome, wealthincome)
+# withWealthIncome <- withWealthIncomeList %>% reduce(left_join, by=c('Country.Name', 'Year'))
+# withWealthIncomeNoDupes <- withWealthIncome[!duplicated(withWealthIncome[c("Country.Name","Year")]),]
+```
